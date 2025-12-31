@@ -45,35 +45,16 @@ class Client:
         
         self.send_message()
 
-    def mystic_commands(self, client_input):
-        commands = client_input.split()
+    # End daemon threads
+    def cleanup(self):
+        self.terminate_client.set()
+        try:
+            self.tcp_socket.close()
+        except:
+            pass
+        sys.exit(0)
 
-        match commands[1:]:  # Skip "mystic"
-            case []:
-                self.tcp_socket.send(client_input.encode())
-
-            case ["disconnect"]:
-                self.terminate_client.set()
-                try:
-                    self.tcp_socket.send(client_input.encode())
-                except (BrokenPipeError, OSError):
-                    pass
-                time.sleep(0.5)
-                return "TERMINATE"
-
-            case _:
-                # Send all commands via TCP
-                self.tcp_socket.send(client_input.encode())
-
-    def print_prompt(self):
-        """Print the input prompt with current state."""
-        if self.state == '[GLOBAL]':
-            state_color = "\033[1;35;40m"  # Magenta for global
-        else:
-            state_color = "\033[1;32;40m"  # Green for groups
-        
-        print(state_color + self.state + "\033[0m" + " " + "\033[1;36;40m" + self.name + ":" + "\033[0m" + " ", end="", flush=True)
-
+    #---------------------------{SENDING}---------------------------------
     def send_message(self):
         try:
             while not self.terminate_client.is_set():
@@ -109,6 +90,28 @@ class Client:
         finally:
             self.cleanup()
 
+    # Sends mystic command to the server to process
+    def mystic_commands(self, client_input):
+        commands = client_input.split()
+
+        match commands[1:]:  # Skip "mystic"
+            case []:
+                self.tcp_socket.send(client_input.encode())
+
+            case ["disconnect"]:
+                self.terminate_client.set()
+                try:
+                    self.tcp_socket.send(client_input.encode())
+                except (BrokenPipeError, OSError):
+                    pass
+                time.sleep(0.5)
+                return "TERMINATE"
+
+            case _:
+                # Send all commands via TCP
+                self.tcp_socket.send(client_input.encode())
+
+    #---------------------------{RECEIVING}---------------------------------
     def receive_tcp_message(self):
         """Main TCP receive loop - accumulates data in buffer and processes complete messages."""
         while not self.terminate_client.is_set():
@@ -137,23 +140,23 @@ class Client:
                 if not self.__process_file_data():
                     return
                 continue
-            
+            # TCP download
             if b"[FILE_START]" in self.recv_buffer:
                 if not self.__process_file_start():
                     return
                 continue
-            
+            # UDP download
             if b"[UDP_FILE_START]" in self.recv_buffer:
                 if not self.__process_udp_file_start():
                     return
                 continue
-            
+            # Text messages / Partial marker detection
             if self.recv_buffer:
                 partial_markers = [b"[FILE_", b"[UDP_F"]
                 
                 keep_from = len(self.recv_buffer)
                 for marker in partial_markers:
-                    for i in range(1, len(marker) + 1):
+                    for i in range(1, len(marker)+1):
                         if self.recv_buffer.endswith(marker[:i]):
                             keep_from = min(keep_from, len(self.recv_buffer) - i)
                             break
@@ -170,6 +173,18 @@ class Client:
                 
             return
 
+    def __process_text_message(self, message):
+        """Display incoming messages and user prompt box"""
+        if not message.strip():
+            return
+        
+        print("\r\033[K", end="")
+        self.display_message(message)
+        
+        if not self.terminate_client.is_set() and self.at_prompt:
+            self.print_prompt()
+
+    #---------------------------{FILE TRANSFER}---------------------------------
     def __process_file_start(self):
         """Process TCP file start marker from buffer."""
         start_marker = b"[FILE_START]"
@@ -178,16 +193,19 @@ class Client:
         start_pos = self.recv_buffer.find(start_marker)
         end_pos = self.recv_buffer.find(end_marker)
         
+        # footer hasn't arrived yet
         if end_pos == -1:
+            # Indicates text message before header, process and print text message
             if start_pos > 0:
                 text_before = self.recv_buffer[:start_pos]
                 try:
                     self.__process_text_message(text_before.decode())
                 except UnicodeDecodeError:
                     pass
-                self.recv_buffer = self.recv_buffer[start_pos:]
+                self.recv_buffer = self.recv_buffer[start_pos:] # Cut off everything before the header
             return False
         
+        # Decode any messages before the file
         if start_pos > 0:
             text_before = self.recv_buffer[:start_pos]
             try:
@@ -196,9 +214,11 @@ class Client:
                 pass
         
         try:
+            # Extract metadata
             info_start = start_pos + len(start_marker)
             file_info = self.recv_buffer[info_start:end_pos].decode()
             
+            # Extract file_size and name 
             parts = file_info.split("|")
             self.current_filename = parts[0]
             self.expected_file_size = int(parts[1])
@@ -207,6 +227,7 @@ class Client:
             
             print(f"\r\033[K\033[1;33;40m[SERVER]\033[0m Starting download: {self.current_filename} ({self.expected_file_size} bytes) via TCP...")
             
+            # Set position of start of data
             self.recv_buffer = self.recv_buffer[end_pos + len(end_marker):]
             return True
             
@@ -216,7 +237,7 @@ class Client:
             return True
 
     def __process_udp_file_start(self):
-        """Process UDP file start marker from buffer."""
+        """Process UDP file start marker from buffer. (Same logic as __process_file_start())"""
         start_marker = b"[UDP_FILE_START]"
         end_marker = b"[UDP_FILE_START_END]"
         
@@ -244,6 +265,7 @@ class Client:
             info_start = start_pos + len(start_marker)
             file_info = self.recv_buffer[info_start:end_pos].decode()
             
+            # Extract file size and udp port
             parts = file_info.split("|")
             self.current_filename = parts[0]
             self.expected_file_size = int(parts[1])
@@ -268,6 +290,7 @@ class Client:
         
         end_pos = self.recv_buffer.find(end_marker)
         
+        # No footer found
         if end_pos != -1:
             file_data = self.recv_buffer[:end_pos]
             self.file_buffer.extend(file_data)
@@ -284,6 +307,7 @@ class Client:
         
         marker_max_len = 30
         
+        # Transfer bytes from recv buffer into file buffer
         if len(self.recv_buffer) > marker_max_len:
             safe_length = len(self.recv_buffer) - marker_max_len
             self.file_buffer.extend(self.recv_buffer[:safe_length])
@@ -371,16 +395,15 @@ class Client:
         self.expected_file_size = 0
         self.receiving_file = False
 
-    def __process_text_message(self, message):
-        """Handle a decoded text message."""
-        if not message.strip():
-            return
+    #---------------------------{DISPLAY}---------------------------------
+    def print_prompt(self):
+        """Print the input prompt with current state."""
+        if self.state == '[GLOBAL]':
+            state_color = "\033[1;35;40m"  # Magenta for global
+        else:
+            state_color = "\033[1;32;40m"  # Green for groups
         
-        print("\r\033[K", end="")
-        self.display_message(message)
-        
-        if not self.terminate_client.is_set() and self.at_prompt:
-            self.print_prompt()
+        print(state_color + self.state + "\033[0m" + " " + "\033[1;36;40m" + self.name + ":" + "\033[0m" + " ", end="", flush=True)
 
     def __update_state(self, content):
         """Update the client state based on server message content."""
@@ -427,7 +450,6 @@ class Client:
             else:
                 print("\033[1;36;40m[PM]\033[0m " + content)
 
-        # ADDITION: Handle broadcast messages
         elif message.startswith("[BROADCAST]"):
             content = message[11:].strip()
             if ": " in content:
@@ -438,14 +460,6 @@ class Client:
 
         else:
             print(message)
-
-    def cleanup(self):
-        self.terminate_client.set()
-        try:
-            self.tcp_socket.close()
-        except:
-            pass
-        sys.exit(0)
 
 
 if __name__ == '__main__':

@@ -8,6 +8,7 @@ class Server:
     groups = []
 
     def __init__(self, HOST, PORT):
+        #Initialize using TCP
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.bind((HOST, PORT))
         self.socket.listen(10)
@@ -19,47 +20,11 @@ class Server:
         
         print("Waiting for client connection...")
 
-    # HELPERS
-    def __in_any_group(self, client_name: str) -> bool:
-        return any(client_name in g["members"] for g in Server.groups)
-
-    def __get_client_group(self, client_name: str) -> str | None:
-        """Return the group name the client is in, or None."""
-        for g in Server.groups:
-            if client_name in g['members']:
-                return g['group_name']
-        return None
-
-    def __get_client_by_name(self, client_name: str):
-        """Find a client dict by name."""
-        return next((c for c in Server.clients if c['client_name'] == client_name), None)
-
-    def __get_group_by_name(self, group_name: str):
-        """Find a group dict by name."""
-        return next((g for g in Server.groups if g['group_name'] == group_name), None)
-
-    def server_message(self, message, exclude_client=None, target_client=None):
-        """Send a server message to clients."""
-        formatted = f"[SERVER] {message}"
-
-        if target_client:
-            try:
-                target_client['client_socket'].send(formatted.encode())
-            except:
-                pass
-            return
-
-        for client in Server.clients:
-            if exclude_client is None or client['client_name'] != exclude_client:
-                try:
-                    client['client_socket'].send(formatted.encode())
-                except:
-                    pass
-
+    # Listens for incoming client connections
     def listen(self):
         while True:
             client_socket, address = self.socket.accept()
-            # REQUIREMENT: Print where connection is coming from (IP address and port)
+            # Display where incoming client connectioons are coming from
             print(f"Connection from {address[0]}:{address[1]}")
 
             client_name = client_socket.recv(1024).decode()
@@ -79,7 +44,7 @@ class Server:
 
             Server.clients.append(client)
 
-            # Send welcome message over network (requirement)
+            # Send welcome message over network 
             welcome_msg = f"[SERVER] Welcome to the Mystic chat room, {client_name}! Type 'mystic help' for commands."
             client_socket.send(welcome_msg.encode())
 
@@ -87,6 +52,72 @@ class Server:
 
             Thread(target=self.__incoming_client, args=(client,)).start()
 
+    def __incoming_client(self, client):
+        client_name = client['client_name']
+        client_socket = client['client_socket']
+
+        while True:
+            try:
+                client_message = client_socket.recv(1024).decode()
+            except (ConnectionResetError, OSError):
+                client_message = ""
+
+            if not client_message.strip():
+                self.__handle_disconnect(client)
+                break
+
+            # Check for mystic commands
+            command_result = self.__parse_mystic_command(client, client_message)
+
+            if command_result == "DISCONNECT":
+                self.__handle_disconnect(client)
+                break
+            elif command_result:
+                continue
+
+            # Regular message - route to appropriate channel
+            client_group = self.__get_client_group(client_name)
+
+            if client_group:
+                self.__broadcast_group_message(client_name, client_group, f"[GROUP:{client_group}] {client_name}: {client_message}")
+            else:
+                self.__broadcast_global_message(client_name, f"[GLOBAL] {client_name}: {client_message}")
+
+    def __handle_disconnect(self, client):
+        client_name = client['client_name']
+        client_socket = client['client_socket']
+
+        if client in Server.clients:
+            Server.clients.remove(client)
+
+        # Remove client from any groups they're in
+        for group in Server.groups[:]:
+            if client_name in group['members']:
+                group['members'].remove(client_name)
+
+                # Notify remaining members
+                for member_name in group['members']:
+                    member = self.__get_client_by_name(member_name)
+                    if member:
+                        self.server_message(f"{client_name} has left {group['group_name']}.", target_client=member)
+
+                # Delete group if empty
+                if not group['members']:
+                    Server.groups.remove(group)
+                    print(f"Group '{group['group_name']}' deleted (no members left).")
+
+        self.server_message(f"{client_name} has left", exclude_client=client_name)
+
+        try:
+            client_socket.send("[SERVER] You have left the chat. Goodbye!".encode())
+            client_socket.shutdown(socket.SHUT_RDWR)
+        except:
+            pass
+
+        client_socket.close()
+        print(f"{client_name} disconnected.")
+
+    #---------------------------{COMMAND PARSING}---------------------------------
     def __parse_mystic_command(self, client, command):
         """
         Parse mystic commands from message.
@@ -110,7 +141,6 @@ class Server:
                 self.__handle_help(client)
                 return True
 
-            # ADDITION: broadcast command for assignment requirement
             case ["broadcast"]:
                 self.server_message("Usage: mystic broadcast <message>", target_client=client)
                 return True
@@ -181,7 +211,6 @@ class Server:
                 self.__handle_list_users(client)
                 return True
 
-            # File download commands
             case ["files"]:
                 self.__handle_list_files(client)
                 return True
@@ -199,7 +228,7 @@ class Server:
                 return True
 
             case ["download", *rest]:
-                # Handle filenames with spaces - last arg might be protocol
+                # Handle filenames with spaces - last arg might be protocol type
                 if rest[-1].lower() in ["tcp", "udp"]:
                     filename = " ".join(rest[:-1])
                     protocol = rest[-1].lower()
@@ -214,6 +243,7 @@ class Server:
                                     target_client=client)
                 return True
 
+    #---------------------------{COMMAND HANDLERS}---------------------------------
     def __handle_help(self, client):
         """Send help message to client."""
         help_text = """--- Mystic Commands ---
@@ -231,6 +261,23 @@ mystic files - Access shared files folder
 mystic download <filename> [tcp|udp] - Download a file (default: tcp)"""
         self.server_message(help_text, target_client=client)
 
+    def __handle_list_users(self, client):
+        """List all online users."""
+        if not Server.clients:
+            self.server_message("No users online.", target_client=client)
+        else:
+            user_names = [c['client_name'] for c in Server.clients]
+            self.server_message(f"Online users: {', '.join(user_names)}", target_client=client)
+
+    def __handle_list_groups(self, client):
+        """List all available groups."""
+        if not Server.groups:
+            self.server_message("No groups exist yet.", target_client=client)
+        else:
+            group_info = [f"{g['group_name']} ({len(g['members'])} members)" for g in Server.groups]
+            self.server_message(f"Groups: {', '.join(group_info)}", target_client=client)
+
+    #---------------------------{MESSAGING HANDLERS}---------------------------------
     def __handle_pm(self, client, target, message):
         """Send a private message to another user."""
         client_name = client['client_name']
@@ -258,7 +305,7 @@ mystic download <filename> [tcp|udp] - Download a file (default: tcp)"""
         # Confirm to sender
         self.server_message(f"PM sent to {target}.", target_client=client)
 
-    # ADDITION: broadcast handler for assignment requirement
+    # broadcast / announcement handler
     def __handle_broadcast(self, client, message):
         """Broadcast message to all other clients."""
         client_name = client['client_name']
@@ -271,6 +318,7 @@ mystic download <filename> [tcp|udp] - Download a file (default: tcp)"""
                 except:
                     pass
 
+    #---------------------------{GROUP HANDLERS}---------------------------------
     def __handle_create_group(self, client, group_name):
         """Create a new group."""
         client_name = client['client_name']
@@ -335,7 +383,7 @@ mystic download <filename> [tcp|udp] - Download a file (default: tcp)"""
                     if member:
                         self.server_message(f"{client_name} has joined {group_name}!", target_client=member)
         else:
-            # REQUIREMENT: If group doesn't exist, create it
+            # If group doesn't exist, create it
             self.server_message(f"'{group_name}' doesn't exist! Creating it now...", target_client=client)
             self.__handle_create_group(client, group_name)
 
@@ -377,22 +425,7 @@ mystic download <filename> [tcp|udp] - Download a file (default: tcp)"""
             self.server_message(f"Group '{group_name}' has been deleted (no members left).")
             print(f"Group '{group_name}' deleted.")
 
-    def __handle_list_groups(self, client):
-        """List all available groups."""
-        if not Server.groups:
-            self.server_message("No groups exist yet.", target_client=client)
-        else:
-            group_info = [f"{g['group_name']} ({len(g['members'])} members)" for g in Server.groups]
-            self.server_message(f"Groups: {', '.join(group_info)}", target_client=client)
-
-    def __handle_list_users(self, client):
-        """List all online users."""
-        if not Server.clients:
-            self.server_message("No users online.", target_client=client)
-        else:
-            user_names = [c['client_name'] for c in Server.clients]
-            self.server_message(f"Online users: {', '.join(user_names)}", target_client=client)
-
+    #---------------------------{FILE TRANSFER HANDLERS}---------------------------------
     def __handle_list_files(self, client):
         """List files in the SharedFiles folder."""
         try:
@@ -404,7 +437,7 @@ mystic download <filename> [tcp|udp] - Download a file (default: tcp)"""
                 self.server_message("Successfully accessed SharedFiles folder. 0 files available.", target_client=client)
                 return
 
-            # Build complete file list as single message to avoid TCP combining issues
+            # Build complete file list as single message
             file_lines = [f"Successfully accessed SharedFiles folder. {len(files)} file(s) available:"]
             for i, filename in enumerate(files, 1):
                 filepath = os.path.join(self.shared_files_path, filename)
@@ -528,70 +561,25 @@ mystic download <filename> [tcp|udp] - Download a file (default: tcp)"""
         except Exception as e:
             self.server_message(f"Error sending file via UDP: {e}", target_client=client)
 
-    def __incoming_client(self, client):
-        client_name = client['client_name']
-        client_socket = client['client_socket']
+    #---------------------------{MESSAGE BROADCASTING}---------------------------------
+    # Broadcasts messages from the server - Can choose who to broadcast to. Broadcasts to all clients by default.
+    def server_message(self, message, exclude_client=None, target_client=None):
+        """Send a server message to clients."""
+        formatted = f"[SERVER] {message}"
 
-        while True:
+        if target_client:
             try:
-                client_message = client_socket.recv(1024).decode()
-            except (ConnectionResetError, OSError):
-                client_message = ""
+                target_client['client_socket'].send(formatted.encode())
+            except:
+                pass
+            return
 
-            if not client_message.strip():
-                self.__handle_disconnect(client)
-                break
-
-            # Check for mystic commands
-            command_result = self.__parse_mystic_command(client, client_message)
-
-            if command_result == "DISCONNECT":
-                self.__handle_disconnect(client)
-                break
-            elif command_result:
-                continue
-
-            # Regular message - route to appropriate channel
-            client_group = self.__get_client_group(client_name)
-
-            if client_group:
-                self.__broadcast_group_message(client_name, client_group, f"[GROUP:{client_group}] {client_name}: {client_message}")
-            else:
-                self.__broadcast_global_message(client_name, f"[GLOBAL] {client_name}: {client_message}")
-
-    def __handle_disconnect(self, client):
-        client_name = client['client_name']
-        client_socket = client['client_socket']
-
-        if client in Server.clients:
-            Server.clients.remove(client)
-
-        # Remove client from any groups they're in
-        for group in Server.groups[:]:
-            if client_name in group['members']:
-                group['members'].remove(client_name)
-
-                # Notify remaining members
-                for member_name in group['members']:
-                    member = self.__get_client_by_name(member_name)
-                    if member:
-                        self.server_message(f"{client_name} has left {group['group_name']}.", target_client=member)
-
-                # Delete group if empty
-                if not group['members']:
-                    Server.groups.remove(group)
-                    print(f"Group '{group['group_name']}' deleted (no members left).")
-
-        self.server_message(f"{client_name} has left", exclude_client=client_name)
-
-        try:
-            client_socket.send("[SERVER] You have left the chat. Goodbye!".encode())
-            client_socket.shutdown(socket.SHUT_RDWR)
-        except:
-            pass
-
-        client_socket.close()
-        print(f"{client_name} disconnected.")
+        for client in Server.clients:
+            if exclude_client is None or client['client_name'] != exclude_client:
+                try:
+                    client['client_socket'].send(formatted.encode())
+                except:
+                    pass
 
     def __broadcast_global_message(self, sender_name, client_message):
         """Broadcast global message to users not in groups."""
@@ -615,6 +603,25 @@ mystic download <filename> [tcp|udp] - Download a file (default: tcp)"""
                     client['client_socket'].send(client_message.encode())
                 except:
                     pass
+
+    #---------------------------{HELPERS}---------------------------------
+    def __in_any_group(self, client_name: str) -> bool:
+        return any(client_name in g["members"] for g in Server.groups)
+
+    def __get_client_group(self, client_name: str) -> str | None:
+        """Return the group name the client is in, or None."""
+        for g in Server.groups:
+            if client_name in g['members']:
+                return g['group_name']
+        return None
+
+    def __get_client_by_name(self, client_name: str):
+        """Find a client dict by name."""
+        return next((c for c in Server.clients if c['client_name'] == client_name), None)
+
+    def __get_group_by_name(self, group_name: str):
+        """Find a group dict by name."""
+        return next((g for g in Server.groups if g['group_name'] == group_name), None)
 
 
 if __name__ == '__main__':
