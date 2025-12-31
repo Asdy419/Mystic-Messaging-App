@@ -548,9 +548,8 @@ mystic download <filename> [tcp|udp] - Download a file (default: tcp)"""
 
             time.sleep(0.1)
 
-            # Send confirmation over TCP
-            end_marker = f"[FILE_END]{file_size}[FILE_END_END]"
-            client_socket.send(end_marker.encode())
+            # DON'T send [FILE_END] over TCP for UDP transfers - it confuses the client
+            # The UDP transfer is self-contained
 
             print(f"File '{filename}' ({file_size} bytes) sent to {client_name} via UDP")
 

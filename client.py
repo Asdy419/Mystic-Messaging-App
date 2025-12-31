@@ -356,13 +356,13 @@ class Client:
             for i in sorted(packets.keys()):
                 self.file_buffer.extend(packets[i])
 
-            self.__save_file()
+            self.__save_file_udp()
 
         except Exception as e:
             print(f"\033[1;31;40mUDP transfer error: {e}\033[0m")
 
     def __save_file(self):
-        """Save the received file."""
+        """Save the received file (TCP)."""
         self.receiving_file = False
 
         if len(self.file_buffer) == 0:
@@ -384,6 +384,33 @@ class Client:
             print(f"\033[1;31;40mError saving file: {e}\033[0m")
 
         self.__reset_file_state()
+
+        if self.at_prompt:
+            self.print_prompt()
+
+    def __save_file_udp(self):
+        """Save the received file (UDP) (separate method to avoid conflicts)."""
+        if len(self.file_buffer) == 0:
+            print(f"\033[1;31;40mNo data received for file.\033[0m")
+            return
+
+        filepath = os.path.join(self.download_folder, self.current_filename)
+
+        try:
+            with open(filepath, 'wb') as f:
+                f.write(self.file_buffer)
+
+            actual_size = len(self.file_buffer)
+            status = "✓" if actual_size == self.expected_file_size else f"⚠ expected {self.expected_file_size}"
+            print(f"\r\033[K\033[1;32;40m[DOWNLOAD COMPLETE]\033[0m {self.current_filename} saved to {filepath} ({actual_size} bytes) {status}")
+
+        except Exception as e:
+            print(f"\033[1;31;40mError saving file: {e}\033[0m")
+
+        # Reset only the file-related state used by UDP
+        self.file_buffer = bytearray()
+        self.current_filename = ""
+        self.expected_file_size = 0
 
         if self.at_prompt:
             self.print_prompt()
